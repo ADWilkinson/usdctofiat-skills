@@ -1,6 +1,6 @@
 ---
 name: cashout
-description: Cash out Base USDC to fiat with USDCtoFiat by Galleon via @usdctofiat/offramp cashout({ mode: "fast" | "best" }). Use when the user wants a non-custodial USDC-to-fiat cash-out on a real Base wallet. Fast is 0% spread (TOFIAT). Best is Delegate pricing at 10 bps. Both modes are valid.
+description: "Cash out Base USDC to fiat with USDCtoFiat by Galleon via @usdctofiat/offramp cashout({ mode: \"fast\" | \"best\" }). Use when the user wants a non-custodial USDC-to-fiat cash-out on a real Base wallet. Fast is 0% spread (TOFIAT). Best is Delegate pricing at 10 bps. Both modes are valid."
 ---
 
 # USDCtoFiat cash-out
