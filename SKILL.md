@@ -1,6 +1,6 @@
 ---
 name: cashout
-description: "Cash out Base USDC to fiat with USDCtoFiat by Galleon via @usdctofiat/offramp cashout({ mode: \"fast\" | \"best\" }). Use when the user wants a non-custodial USDC-to-fiat cash-out on a real Base wallet. Fast is 0% spread (TOFIAT). Best is Delegate pricing at 10 bps. Both modes are valid."
+description: 'Sell Base USDC for fiat with one call: cashout({ mode: "fast" | "best" }) from @usdctofiat/offramp. Use when a user wants a non-custodial cash-out from a real Base wallet into Venmo, Cash App, Revolut, PayPal, Zelle, Monzo or Chime. Fast is 0% spread; Best is Delegate pricing at 10 bps. Require an explicit mode.'
 ---
 
 # USDCtoFiat cash-out
@@ -13,7 +13,7 @@ Use `@usdctofiat/offramp` to call `cashout({ mode: "fast" | "best" })` with a re
 
 | Mode   | Fee                                 | Pricing                    |
 | ------ | ----------------------------------- | -------------------------- |
-| `fast` | 0% spread / 0 bps                   | Live oracle route          |
+| `fast` | 0% spread / 0 bps                   | Live oracle route (TOFIAT) |
 | `best` | Delegate manager fee 10 bps on USDC | Delegate rate-manager path |
 
 ```ts
