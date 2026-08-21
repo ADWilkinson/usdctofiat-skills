@@ -3,11 +3,12 @@
 Installable Agent Skills for [USDCtoFiat](https://usdctofiat.xyz) and [`@usdctofiat/offramp`](https://www.npmjs.com/package/@usdctofiat/offramp).
 
 ```bash
-npx skills add ADWilkinson/usdctofiat-skills
+npm exec --package=skills@1.5.23 -- skills add ADWilkinson/usdctofiat-skills
 # or a single skill
-npx skills add ADWilkinson/usdctofiat-skills --skill cashout
+npm exec --package=skills@1.5.23 -- skills add ADWilkinson/usdctofiat-skills --skill cashout
+npm install @usdctofiat/offramp@8.0.1
 ```
 
 - App: https://usdctofiat.xyz
 - Developers: https://usdctofiat.xyz/developers
-- Plugin package: https://github.com/ADWilkinson/galleonlabs-zkp2p/tree/main/packages/usdctofiat-plugin
+- Cash-out skill: https://github.com/ADWilkinson/usdctofiat-skills/tree/main/skills/cashout
