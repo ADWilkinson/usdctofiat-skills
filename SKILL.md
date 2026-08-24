@@ -59,7 +59,7 @@ export async function watchCashout(depositId: string) {
 ## Install
 
 ```bash
-npm install @usdctofiat/offramp
+npm install @usdctofiat/offramp@8.0.1
 ```
 
 ```ts
