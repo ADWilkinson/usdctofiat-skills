@@ -518,14 +518,20 @@ def object_keys(src: str) -> list[str]:
     return keys
 
 
+def fenced_spans(skill: str) -> list[tuple[int, int]]:
+    return [(m.start(), m.end()) for m in re.finditer(r"```.*?```", skill, re.S)]
+
+
 def cashout_example_keys(skill: str) -> set[str]:
     keys: set[str] = set()
-    saw_mode = False
+    fences = fenced_spans(skill)
+    examples = 0
     i = 0
     while True:
         m = re.search(r"\bcashout\s*\(", skill[i:])
         if not m:
             break
+        call_at = i + m.start()
         start = i + m.end()
         depth = 1
         j = start
@@ -541,12 +547,20 @@ def cashout_example_keys(skill: str) -> set[str]:
             continue
         found = object_keys(args)
         keys.update(found)
-        if "mode" in found:
-            saw_mode = True
+        # Only fenced code is an example an agent copies. The frontmatter and prose
+        # also spell cashout({ mode: ... }), which would satisfy 'mode' for free.
+        if not any(lo <= call_at < hi for lo, hi in fences):
+            continue
+        examples += 1
+        if "mode" not in found:
+            line = skill.count("\n", 0, call_at) + 1
+            err(
+                f"{SKILL}:{line}: cashout() example omits the required 'mode' argument"
+            )
     if not keys:
         err(f"{SKILL}: no cashout({{ ... }}) example keys found")
-    if not saw_mode:
-        err(f"{SKILL}: cashout() example is missing required argument key 'mode'")
+    if not examples:
+        err(f"{SKILL}: no fenced cashout({{ ... }}) example found")
     return keys
 
 
