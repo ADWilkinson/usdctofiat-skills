@@ -7,6 +7,7 @@ python3 - <<'PY'
 from __future__ import annotations
 
 import base64
+import difflib
 import hashlib
 import io
 import json
@@ -29,6 +30,36 @@ UA = "usdctofiat-skills-verify-surface (+https://github.com/ADWilkinson/usdctofi
 PIN_RE = re.compile(r"^npm install @usdctofiat/offramp@(\d+\.\d+\.\d+)$", re.M)
 IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 IDENT = r"[A-Za-z_][A-Za-z0-9_]*"
+
+# Backticked capitalised identifiers in SKILL.md prose are read as claimed root
+# exports of PACKAGE. That inference is deliberately broad: OfframpError,
+# PLATFORMS and peerExtensionSdk are documented in prose and imported in no
+# example, so narrowing the scan to import statements would drop three of the
+# seven symbols it verifies.
+#
+# The cost is that an ordinary domain noun is indistinguishable from a bogus
+# export claim. This set is the escape hatch. Add a term only when it names
+# something outside PACKAGE for good -- a currency, a chain, a contract, a
+# payment platform. Never add a symbol to turn a red build green when the doc
+# is what drifted; main() fails if an entry here is really a root export.
+PROSE_NON_SDK = {
+    # Currencies and token symbols.
+    "EUR",
+    "GBP",
+    "USD",
+    "USDC",
+    # Chains and on-chain contracts.
+    "Base",
+    "ERC20",
+    "EscrowV2",
+    # Payment platforms the skill can pay out to.
+    "Chime",
+    "Monzo",
+    "PayPal",
+    "Revolut",
+    "Venmo",
+    "Zelle",
+}
 TS_SKIP = {
     "string",
     "number",
@@ -434,26 +465,38 @@ def import_names(inner: str) -> set[str]:
     return names
 
 
-def documented_root_exports(skill: str, error_codes: set[str]) -> set[str]:
-    names: set[str] = set()
+def documented_root_exports(
+    skill: str, error_codes: set[str]
+) -> tuple[set[str], set[str]]:
+    """Return (imported, prose) claimed root exports of PACKAGE.
+
+    The two are kept apart so a failure can say which one to fix: an import is
+    an unambiguous claim, prose is an inference PROSE_NON_SDK can wave off.
+    """
+    imports: set[str] = set()
     other_imports: set[str] = set()
     for inner, pkg in re.findall(
         r'import\s+(?:type\s+)?\{([^}]+)\}\s+from\s+"([^"]+)"', skill
     ):
         imported = import_names(inner)
         if pkg == PACKAGE:
-            names |= imported
+            imports |= imported
         else:
             other_imports |= imported
+    prose: set[str] = set()
     stripped = re.sub(r"```.*?```", " ", skill, flags=re.S)
     for ident in re.findall(rf"`({IDENT})`", stripped):
         if ident in error_codes or ident in other_imports:
             continue
+        # Prose only. An `import { X } from PACKAGE` above says X is an export
+        # outright, so the allowlist must not excuse it.
+        if ident in PROSE_NON_SDK:
+            continue
         if ident == "peerExtensionSdk" or ident[0].isupper():
-            names.add(ident)
-    if not names:
+            prose.add(ident)
+    if not (imports | prose):
         err(f"{SKILL}: no documented root SDK exports found")
-    return names
+    return imports, prose
 
 
 def object_keys(src: str) -> list[str]:
@@ -706,13 +749,33 @@ def main() -> None:
 
         error_codes_doc = documented_error_codes(skill)
         steps_doc = documented_steps(skill)
-        root_doc = documented_root_exports(skill, error_codes_doc)
+        imported_doc, prose_doc = documented_root_exports(skill, error_codes_doc)
+        root_doc = imported_doc | prose_doc
         example_keys = cashout_example_keys(skill)
+
+        for name in sorted(PROSE_NON_SDK & root_names):
+            err(
+                f"scripts/verify-surface.sh: PROSE_NON_SDK lists {name!r}, which is a "
+                f"root export of {PACKAGE}@{pin}; drop it so the prose scan checks it"
+            )
 
         for name in sorted(root_doc):
             if name not in root_names:
+                near = difflib.get_close_matches(
+                    name, sorted(root_names), n=1, cutoff=0.8
+                )
+                if near:
+                    fix = f"did you mean {near[0]!r}?"
+                elif name in imported_doc:
+                    fix = "drop it from the import, or repin to a version exporting it"
+                else:
+                    fix = (
+                        "correct the doc, or add it to PROSE_NON_SDK in "
+                        "scripts/verify-surface.sh if it names something outside the SDK"
+                    )
                 err(
-                    f"{SKILL}: documented export {name!r} is not a root export of {PACKAGE}@{pin}"
+                    f"{SKILL}: documented export {name!r} is not a root export of "
+                    f"{PACKAGE}@{pin}; {fix}"
                 )
 
         codes_resolved = bundle.resolve("OFFRAMP_ERROR_CODES", pin)
