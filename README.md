@@ -6,7 +6,7 @@ Installable Agent Skills for [USDCtoFiat](https://usdctofiat.xyz) and [`@usdctof
 npm exec --package=skills@1.5.23 -- skills add ADWilkinson/usdctofiat-skills
 # or a single skill
 npm exec --package=skills@1.5.23 -- skills add ADWilkinson/usdctofiat-skills --skill cashout
-npm install @usdctofiat/offramp@8.0.2
+npm install @usdctofiat/offramp@9.0.0
 ```
 
 - App: https://usdctofiat.xyz
