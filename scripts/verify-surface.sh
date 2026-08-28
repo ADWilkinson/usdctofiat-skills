@@ -687,6 +687,49 @@ def safe_extract(tar: tarfile.TarFile, dest: Path) -> None:
     tar.extractall(dest, **kwargs)
 
 
+def subpath_entries(pkg_root: Path) -> dict[str, Path]:
+    """Map each non-root export specifier to its type-declaration entry."""
+    meta = json.loads((pkg_root / "package.json").read_text(encoding="utf-8"))
+    exports = meta.get("exports")
+    out: dict[str, Path] = {}
+    if not isinstance(exports, dict):
+        return out
+    for sub, val in exports.items():
+        if sub == "." or not sub.startswith("./") or not isinstance(val, dict):
+            continue
+        types = None
+        imp = val.get("import")
+        if isinstance(imp, dict) and isinstance(imp.get("types"), str):
+            types = imp["types"]
+        elif isinstance(val.get("types"), str):
+            types = val["types"]
+        if not types:
+            continue
+        path = pkg_root / types
+        if path.is_file():
+            out[f"{PACKAGE}/{sub[2:]}"] = path
+    return out
+
+
+def prose_call_identifiers(skill: str) -> set[str]:
+    """Leading identifier of every backticked prose span.
+
+    documented_root_exports() only sees a span that is *entirely* an identifier,
+    so a documented call such as `usePeerExtensionRegistration(platform)` is
+    invisible to it -- the trailing argument list breaks the full match. This
+    scan is deliberately looser and keeps the leading identifier of any span;
+    main() then discards every candidate that is not really exported by PACKAGE,
+    which is what stops ordinary prose words from being read as export claims.
+    """
+    stripped = re.sub(r"```.*?```", " ", skill, flags=re.S)
+    names: set[str] = set()
+    for span in re.findall(r"`([^`]+)`", stripped):
+        m = re.match(rf"^({IDENT})", span)
+        if m:
+            names.add(m.group(1))
+    return names
+
+
 def entry_dts(pkg_root: Path, pin: str) -> Path:
     meta_path = pkg_root / "package.json"
     if not meta_path.is_file():
@@ -778,6 +821,27 @@ def main() -> None:
                     f"{PACKAGE}@{pin}; {fix}"
                 )
 
+        # A symbol the SDK ships only from a subpath is unusable via the root
+        # import the Install section documents. Naming the specifier is the
+        # minimum that keeps a copied example resolvable.
+        subpaths = subpath_entries(pkg_root)
+        subpath_names = {
+            spec: named_root_exports(bundle.text(path))
+            for spec, path in subpaths.items()
+        }
+        for name in sorted(prose_call_identifiers(skill)):
+            if name in root_names:
+                continue
+            homes = sorted(s for s, v in subpath_names.items() if name in v)
+            if not homes:
+                continue
+            if any(spec in skill for spec in homes):
+                continue
+            err(
+                f"{SKILL}: {name!r} is exported from {' / '.join(homes)}, not the "
+                f"{PACKAGE}@{pin} root; name that subpath where the doc uses it"
+            )
+
         codes_resolved = bundle.resolve("OFFRAMP_ERROR_CODES", pin)
         sdk_code_count = 0
         if codes_resolved is not None:
@@ -852,8 +916,8 @@ def main() -> None:
 
         print(
             f"ok: {PACKAGE}@{pin}; {len(root_doc)} root exports; "
-            f"{sdk_code_count} error codes; {sdk_step_count} steps; "
-            f"{sdk_key_count} cashout keys"
+            f"{len(subpaths)} subpaths; {sdk_code_count} error codes; "
+            f"{sdk_step_count} steps; {sdk_key_count} cashout keys"
         )
         if latest and latest != pin:
             print(f"notice: pin {pin} lags registry latest {latest}")
