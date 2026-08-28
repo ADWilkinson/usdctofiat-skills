@@ -1,6 +1,6 @@
 ---
 name: cashout
-description: 'Sell Base USDC for fiat with one call: cashout({ mode: "fast" | "best" }) from @usdctofiat/offramp. Use when a user wants a non-custodial cash-out from a real Base wallet into Venmo, Cash App, Revolut, PayPal, Zelle, Monzo or Chime. Fast is 0% spread; Best is Delegate pricing at 10 bps. Require an explicit mode.'
+description: 'Sell Base USDC for fiat with one call: cashout({ mode: "fast" | "best" }) from @usdctofiat/offramp. Use when a user wants a non-custodial cash-out from a real Base wallet into Venmo, Revolut, PayPal, Zelle, Monzo or Chime. Cash App is disabled in the SDK. Fast is 0% spread; Best is Delegate pricing at 10 bps. Require an explicit mode.'
 ---
 
 # USDCtoFiat cash-out
@@ -41,6 +41,17 @@ Strings and numbers are human USDC amounts. A `bigint` is exact six-decimal base
 
 Persist `depositId` immediately. Fast `depositId` is the composite resume key for `createOfframp().watch()`. Best `depositId` is the numeric EscrowV2 id for `deposits()` / `close()`.
 
+## Disabled rails
+
+`OFFRAMP_DISABLED_PAYMENT_PLATFORMS` is the SDK's own rail kill-switch and currently holds `cashapp`. A disabled rail is dropped from capability discovery and rejected before any deposit transaction, whatever the host passes, so do not offer Cash App. Test with `isPaymentPlatformDisabled` and surface `DISABLED_PAYMENT_PLATFORM_MESSAGE` instead of inventing copy.
+
+A host adds its own rollout gate with `disabledPlatforms`, on `createOfframp()` or per call. Display names and separator variants canonicalize, so `Cash App`, `cash-app` and `cash_app` all hit the same gate.
+
+```ts
+// hostRollout.disabledRails is the host's own list, not an SDK default.
+const order = await cashout({ ...input, mode: "fast", disabledPlatforms: hostRollout.disabledRails });
+```
+
 ## createOfframp()
 
 Attribution is configured by `@usdctofiat/offramp`.
@@ -59,7 +70,7 @@ export async function watchCashout(depositId: string) {
 ## Install
 
 ```bash
-npm install @usdctofiat/offramp@8.0.2
+npm install @usdctofiat/offramp@9.0.0
 ```
 
 ```ts
@@ -87,7 +98,7 @@ Managed-path errors extend `OfframpError` with a typed `code`:
 
 `usePeerExtensionRegistration` ships from the `@usdctofiat/offramp/react` subpath, not the package root. Non-React callers use the root `peerExtensionSdk`.
 
-Progress callback via `onProgress: (p) => void` with `step` values: `approving`, `registering`, `depositing`, `confirming`, `delegating`, `restricting`, `resuming`, `done`.
+Progress callback via `onProgress: (p) => void` with `step` values: `approving`, `registering`, `depositing`, `confirming`, `protecting`, `delegating`, `restricting`, `resuming`, `done`.
 
 ## Rules
 
@@ -96,4 +107,5 @@ Progress callback via `onProgress: (p) => void` with `step` values: `approving`,
 - Do not invent a sandbox. Production Base only.
 - Read platform identifier rules from `PLATFORMS`; do not copy a stale list.
 - Do not offer Wise while its published P2P crypto-sale prohibition applies.
-- Pass `otcTaker` only when the order should be restricted to one buyer.
+- Never pass `otcTaker` on a fresh cash-out. The protocol cannot create a deposit paused and private in one transaction, so 9.0.0 rejects it with `UNSUPPORTED`.
+- Restrict an already-confirmed undelegated deposit with `enableOtc`, and lift it with `disableOtc`.
