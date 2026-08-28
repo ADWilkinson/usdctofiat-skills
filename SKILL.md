@@ -85,6 +85,8 @@ Managed-path errors extend `OfframpError` with a typed `code`:
 | `USER_CANCELLED`                  | Wallet rejected a prompt                 | Do not retry automatically                                     |
 | `UNSUPPORTED`                     | Non-Base chain or missing client         | Switch network / pass a Base `WalletClient`                    |
 
+`usePeerExtensionRegistration` ships from the `@usdctofiat/offramp/react` subpath, not the package root. Non-React callers use the root `peerExtensionSdk`.
+
 Progress callback via `onProgress: (p) => void` with `step` values: `approving`, `registering`, `depositing`, `confirming`, `delegating`, `restricting`, `resuming`, `done`.
 
 ## Rules
