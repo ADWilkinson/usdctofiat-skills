@@ -1,6 +1,6 @@
 ---
 name: cashout
-description: 'Sell Base USDC for fiat with one call: cashout({ mode: "fast" | "best" }) from @usdctofiat/offramp. Use when a user wants a non-custodial cash-out from a real Base wallet into Venmo, Revolut, PayPal, Zelle, Monzo or Chime. Cash App is disabled in the SDK. Fast is 0% spread; Best is Delegate pricing at 10 bps. Require an explicit mode.'
+description: 'Sell Base USDC for fiat with one call: cashout({ mode: "fast" | "best" }) from @usdctofiat/offramp. Use when a user wants a non-custodial cash-out from a real Base wallet into Venmo, Revolut, PayPal, Zelle, Monzo, Chime or Mercado Pago. Cash App is disabled in the SDK. Fast is 0% spread; Best is Delegate pricing at 10 bps. Require an explicit mode.'
 ---
 
 # USDCtoFiat cash-out
@@ -40,6 +40,24 @@ const best = await cashout({ ...input, mode: "best" });
 Strings and numbers are human USDC amounts. A `bigint` is exact six-decimal base units. The helper is production-only and requires an explicit mode.
 
 Persist `depositId` immediately. Fast `depositId` is the composite resume key for `createOfframp().watch()`. Best `depositId` is the numeric EscrowV2 id for `deposits()` / `close()`.
+
+## Rails
+
+Every rail in `PLATFORMS`. The Offer column is this skill's routing guidance, not an SDK field: a no rail is still a real `PLATFORMS` entry, so read the reason before assuming the SDK will reject it.
+
+| Rail         | Offer | Why                                                            |
+| ------------ | ----- | -------------------------------------------------------------- |
+| Venmo        | yes   |                                                                |
+| Revolut      | yes   |                                                                |
+| PayPal       | yes   | May require provider preapproval for cryptocurrency payments   |
+| Zelle        | yes   |                                                                |
+| Monzo        | yes   |                                                                |
+| Chime        | yes   |                                                                |
+| Mercado Pago | yes   |                                                                |
+| Wise         | no    | Published P2P crypto-sale prohibition; the SDK still allows it |
+| Cash App     | no    | Held in the SDK's own `OFFRAMP_DISABLED_PAYMENT_PLATFORMS`     |
+
+A yes rail is offerable, not preapproved. The payment-policy boundary above still applies, and currencies and payee identifier rules come from the SDK, not from this table.
 
 ## Disabled rails
 

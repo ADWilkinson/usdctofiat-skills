@@ -414,6 +414,52 @@ class DtsBundle:
         return found
 
 
+def normalize_rail(name: str) -> str:
+    """Canonicalize a rail the way the SDK's own platform gate does."""
+    return re.sub(r"[^a-z0-9]", "", name.lower())
+
+
+def frontmatter_description(skill: str) -> str:
+    m = re.match(r"---\n(.*?)\n---\n", skill, re.S)
+    if not m:
+        err(f"{SKILL}: missing YAML frontmatter")
+        return ""
+    d = re.search(r"^description:\s*(.+)$", m.group(1), re.M)
+    if not d:
+        err(f"{SKILL}: frontmatter has no description")
+        return ""
+    return d.group(1).strip()
+
+
+def documented_rails(skill: str) -> dict[str, bool]:
+    """Return {rail display name: offerable} from the rails table."""
+    rails: dict[str, bool] = {}
+    in_table = False
+    for line in skill.splitlines():
+        if line.startswith("|") and re.search(
+            r"\|\s*Rail\s*\|\s*Offer\s*\|", line, re.I
+        ):
+            in_table = True
+            continue
+        if not in_table:
+            continue
+        if not line.startswith("|"):
+            break
+        if re.match(r"^\|\s*-+", line):
+            continue
+        cols = [c.strip() for c in line.split("|")]
+        if len(cols) < 3:
+            continue
+        name, offer = cols[1], cols[2].lower()
+        if offer not in {"yes", "no"}:
+            err(f"{SKILL}: rail {name!r} has Offer {cols[2]!r}; write yes or no")
+            continue
+        rails[name] = offer == "yes"
+    if not rails:
+        err(f"{SKILL}: no rails table rows found")
+    return rails
+
+
 def documented_error_codes(skill: str) -> set[str]:
     codes: set[str] = set()
     in_table = False
@@ -910,6 +956,71 @@ def main() -> None:
                 f"{SKILL}: OfframpCashoutInput is not a root export of {PACKAGE}@{pin}"
             )
 
+        # The rails table is the skill's routing surface, and nothing else here
+        # checks it. Unverified, it named eight rails against a nine-rail SDK
+        # from at least 8.0.2 through 9.0.0, silently dropping mercadopago.
+        rails_doc = documented_rails(skill)
+        sdk_rail_count = 0
+        platforms_resolved = bundle.resolve("PLATFORMS", pin)
+        if platforms_resolved is not None:
+            path, _orig, decl = platforms_resolved
+            sdk_rails = {normalize_rail(k) for k in const_object_keys(decl)}
+            sdk_rail_count = len(sdk_rails)
+            doc_rails = {normalize_rail(n): n for n in rails_doc}
+            if not sdk_rails:
+                err(f"{path.name}: PLATFORMS keys could not be parsed in {PACKAGE}@{pin}")
+            for rail in sorted(sdk_rails - set(doc_rails)):
+                err(
+                    f"{SKILL}: rails table is missing the {rail!r} rail from "
+                    f"{path.name} ({PACKAGE}@{pin})"
+                )
+            for rail in sorted(set(doc_rails) - sdk_rails):
+                err(
+                    f"{SKILL}: rails table has {doc_rails[rail]!r} which is not a "
+                    f"PLATFORMS rail in {PACKAGE}@{pin}"
+                )
+        else:
+            err(f"{SKILL}: PLATFORMS is not a root export of {PACKAGE}@{pin}")
+
+        # One-way on purpose. Offering a rail the SDK rejects before the deposit
+        # transaction is the failure that costs a user a wallet prompt; refusing
+        # one the SDK allows is a deliberate policy call the Why column carries.
+        disabled_resolved = bundle.resolve("OFFRAMP_DISABLED_PAYMENT_PLATFORMS", pin)
+        if disabled_resolved is not None:
+            path, _orig, decl = disabled_resolved
+            sdk_disabled = {normalize_rail(v) for v in union_string_literals(decl)}
+            if not sdk_disabled and "[]" not in re.sub(r"\s+", "", decl):
+                err(
+                    f"{path.name}: OFFRAMP_DISABLED_PAYMENT_PLATFORMS entries could "
+                    f"not be parsed in {PACKAGE}@{pin}"
+                )
+            for rail in sorted(sdk_disabled):
+                named = next(
+                    (n for n in rails_doc if normalize_rail(n) == rail), None
+                )
+                if named is not None and rails_doc[named]:
+                    err(
+                        f"{SKILL}: rails table offers {named!r}, which "
+                        f"{PACKAGE}@{pin} disables via "
+                        f"OFFRAMP_DISABLED_PAYMENT_PLATFORMS"
+                    )
+        else:
+            err(
+                f"{SKILL}: OFFRAMP_DISABLED_PAYMENT_PLATFORMS is not a root export "
+                f"of {PACKAGE}@{pin}"
+            )
+
+        # The description is what an agent matches a user's request against, so a
+        # rail absent from it is unreachable however the body reads.
+        description = normalize_rail(frontmatter_description(skill))
+        if description:
+            for name in sorted(n for n, offerable in rails_doc.items() if offerable):
+                if normalize_rail(name) not in description:
+                    err(
+                        f"{SKILL}: frontmatter description does not name the "
+                        f"offerable rail {name!r}"
+                    )
+
         latest = (packument.get("dist-tags") or {}).get("latest")
         if errors:
             fail_exit()
@@ -917,7 +1028,8 @@ def main() -> None:
         print(
             f"ok: {PACKAGE}@{pin}; {len(root_doc)} root exports; "
             f"{len(subpaths)} subpaths; {sdk_code_count} error codes; "
-            f"{sdk_step_count} steps; {sdk_key_count} cashout keys"
+            f"{sdk_step_count} steps; {sdk_key_count} cashout keys; "
+            f"{sdk_rail_count} rails"
         )
         if latest and latest != pin:
             print(f"notice: pin {pin} lags registry latest {latest}")
