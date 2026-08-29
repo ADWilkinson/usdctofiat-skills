@@ -2,6 +2,8 @@
 
 Installable Agent Skills for [USDCtoFiat](https://usdctofiat.xyz) and [`@usdctofiat/offramp`](https://www.npmjs.com/package/@usdctofiat/offramp).
 
+![USDCtoFiat](https://usdctofiat.xyz/og-image-galleon.png)
+
 ```bash
 npm exec --package=skills@1.5.23 -- skills add ADWilkinson/usdctofiat-skills
 # or a single skill
