@@ -15,5 +15,6 @@ npm install @usdctofiat/offramp@9.0.0
 - Developers: https://usdctofiat.xyz/developers
 - Scaffold: `npx create-offramp-app@0.1.16 my-offramp --template=next`
 - skills.sh: https://www.skills.sh/adwilkinson/usdctofiat-skills/cashout
+- cursor.directory: https://cursor.directory/plugins/usdctofiat
 - agentskill.sh: https://agentskill.sh/@adwilkinson/cashout
 - Cash-out skill: https://github.com/ADWilkinson/usdctofiat-skills/tree/main/skills/cashout
