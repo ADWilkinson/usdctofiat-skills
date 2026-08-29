@@ -26,10 +26,15 @@ ROOT = Path(".")
 SKILL = ROOT / "skills/cashout/SKILL.md"
 REGISTRY = "https://registry.npmjs.org/@usdctofiat/offramp"
 PACKAGE = "@usdctofiat/offramp"
+# PACKAGE re-exports its cash-out amount floors from this dependency rather
+# than declaring them, so their values are not in PACKAGE's own tarball.
+BOUNDS_PACKAGE = "@zkp2p/cash"
+BOUNDS_REGISTRY = "https://registry.npmjs.org/@zkp2p/cash"
 UA = "usdctofiat-skills-verify-surface (+https://github.com/ADWilkinson/usdctofiat-skills)"
 PIN_RE = re.compile(r"^npm install @usdctofiat/offramp@(\d+\.\d+\.\d+)$", re.M)
 IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 IDENT = r"[A-Za-z_][A-Za-z0-9_]*"
+USDC_DECIMALS = 6
 
 # Backticked capitalised identifiers in SKILL.md prose are read as claimed root
 # exports of PACKAGE. That inference is deliberately broad: OfframpError,
@@ -460,6 +465,42 @@ def documented_rails(skill: str) -> dict[str, bool]:
     return rails
 
 
+def documented_bounds(skill: str) -> dict[str, tuple[int, str]]:
+    """Return {constant: (base units, USDC cell)} from the amounts table."""
+    bounds: dict[str, tuple[int, str]] = {}
+    in_table = False
+    for line in skill.splitlines():
+        if line.startswith("|") and re.search(
+            r"\|\s*Bound\s*\|\s*Base units\s*\|\s*USDC\s*\|", line, re.I
+        ):
+            in_table = True
+            continue
+        if not in_table:
+            continue
+        if not line.startswith("|"):
+            break
+        if re.match(r"^\|\s*-+", line):
+            continue
+        cols = [c.strip() for c in line.split("|")]
+        if len(cols) < 4:
+            continue
+        name = re.fullmatch(rf"`({IDENT})`", cols[1])
+        units = re.fullmatch(r"`(\d+)n`", cols[2])
+        if not name:
+            err(f"{SKILL}: amounts table row {cols[1]!r} is not a backticked constant")
+            continue
+        if not units:
+            err(
+                f"{SKILL}: amounts bound {name.group(1)!r} has Base units {cols[2]!r}; "
+                "write a backticked bigint literal such as `10000n`"
+            )
+            continue
+        bounds[name.group(1)] = (int(units.group(1)), cols[3])
+    if not bounds:
+        err(f"{SKILL}: no amounts table rows found")
+    return bounds
+
+
 def documented_error_codes(skill: str) -> set[str]:
     codes: set[str] = set()
     in_table = False
@@ -705,29 +746,31 @@ def collect_input_keys(bundle: DtsBundle, path: Path, name: str) -> set[str]:
     return keys
 
 
-def verify_integrity(blob: bytes, integrity: str, pin: str) -> None:
+def verify_integrity(
+    blob: bytes, integrity: str, pin: str, pkg: str = PACKAGE
+) -> None:
     if "-" not in integrity:
-        err(f"{PACKAGE}@{pin}: packument dist.integrity is malformed")
+        err(f"{pkg}@{pin}: packument dist.integrity is malformed")
         fail_exit()
     algo, b64 = integrity.split("-", 1)
     try:
         digest = hashlib.new(algo, blob).digest()
     except ValueError:
-        err(f"{PACKAGE}@{pin}: unsupported integrity algorithm {algo}")
+        err(f"{pkg}@{pin}: unsupported integrity algorithm {algo}")
         fail_exit()
         return
     actual = base64.b64encode(digest).decode("ascii")
     if actual != b64:
-        err(f"{PACKAGE}@{pin}: tarball integrity mismatch")
+        err(f"{pkg}@{pin}: tarball integrity mismatch")
         fail_exit()
 
 
-def safe_extract(tar: tarfile.TarFile, dest: Path) -> None:
+def safe_extract(tar: tarfile.TarFile, dest: Path, pkg: str = PACKAGE) -> None:
     dest = dest.resolve()
     for member in tar.getmembers():
         target = (dest / member.name).resolve()
         if dest != target and dest not in target.parents:
-            err(f"{PACKAGE}: tarball member escapes extract dir: {member.name}")
+            err(f"{pkg}: tarball member escapes extract dir: {member.name}")
             fail_exit()
     kwargs = {"filter": "data"} if hasattr(tarfile, "data_filter") else {}
     tar.extractall(dest, **kwargs)
@@ -774,6 +817,69 @@ def prose_call_identifiers(skill: str) -> set[str]:
         if m:
             names.add(m.group(1))
     return names
+
+
+def bounds_dependency_pin(pkg_root: Path, pin: str) -> str | None:
+    """Version of BOUNDS_PACKAGE that PACKAGE@pin declares a dependency on."""
+    meta = json.loads((pkg_root / "package.json").read_text(encoding="utf-8"))
+    spec = (meta.get("dependencies") or {}).get(BOUNDS_PACKAGE)
+    if not isinstance(spec, str):
+        err(
+            f"{PACKAGE}@{pin}: no {BOUNDS_PACKAGE} dependency, so the amounts "
+            "table cannot be verified; drop the table or repoint this check"
+        )
+        return None
+    exact = spec.lstrip("=v")
+    if re.fullmatch(r"\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?", exact):
+        return exact
+    ranged = spec.lstrip("^~=v")
+    if re.fullmatch(r"\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?", ranged):
+        # A range resolves at install time to something this script cannot see.
+        # Checking its floor is weaker than checking the installed version, so
+        # say so rather than reporting a stronger result than was measured.
+        print(
+            f"notice: {PACKAGE}@{pin} depends on {BOUNDS_PACKAGE}{spec}; "
+            f"amounts verified against {ranged}, not the resolved version"
+        )
+        return ranged
+    err(f"{PACKAGE}@{pin}: cannot read a version from {BOUNDS_PACKAGE} spec {spec!r}")
+    return None
+
+
+def dependency_bigint_consts(names: list[str], dep_pin: str) -> dict[str, int]:
+    """Declared value of each `declare const NAME = <n>n` in BOUNDS_PACKAGE."""
+    packument = json.loads(http_get(BOUNDS_REGISTRY).decode("utf-8"))
+    versions = packument.get("versions") or {}
+    if dep_pin not in versions:
+        err(f"{BOUNDS_PACKAGE}@{dep_pin} is not a published version")
+        return {}
+    dist = versions[dep_pin].get("dist") or {}
+    tarball_url = dist.get("tarball")
+    if not tarball_url:
+        err(f"{BOUNDS_PACKAGE}@{dep_pin}: packument is missing dist.tarball")
+        return {}
+    blob = http_get(tarball_url)
+    integrity = dist.get("integrity")
+    if integrity:
+        verify_integrity(blob, integrity, dep_pin, BOUNDS_PACKAGE)
+    found: dict[str, int] = {}
+    with tempfile.TemporaryDirectory(prefix="usdctofiat-bounds-") as tmp:
+        dest = Path(tmp)
+        with tarfile.open(fileobj=io.BytesIO(blob), mode="r:gz") as tar:
+            safe_extract(tar, dest, BOUNDS_PACKAGE)
+        root = dest / "package"
+        if not root.is_dir():
+            err(f"{BOUNDS_PACKAGE}@{dep_pin}: tarball missing package/ directory")
+            return {}
+        sources = sorted(root.rglob("*.d.ts")) + sorted(root.rglob("*.d.cts"))
+        for name in names:
+            pat = re.compile(rf"\bdeclare\s+const\s+{re.escape(name)}\s*=\s*(\d+)n\b")
+            for src in sources:
+                m = pat.search(strip_comments(src.read_text(encoding="utf-8")))
+                if m:
+                    found[name] = int(m.group(1))
+                    break
+    return found
 
 
 def entry_dts(pkg_root: Path, pin: str) -> Path:
@@ -1010,6 +1116,46 @@ def main() -> None:
                 f"of {PACKAGE}@{pin}"
             )
 
+        # The root-export scan proves only that these names exist. Their values
+        # live in the SDK's own dependency, so nothing else here would notice a
+        # floor going stale, and a wrong floor is advice that creates a deposit
+        # which can never fill.
+        bounds_doc = documented_bounds(skill)
+        sdk_bound_count = 0
+        dep_pin = bounds_dependency_pin(pkg_root, pin) if bounds_doc else None
+        if bounds_doc and dep_pin:
+            sdk_bounds = dependency_bigint_consts(sorted(bounds_doc), dep_pin)
+            sdk_bound_count = len(sdk_bounds)
+            for name, (units, usdc_cell) in sorted(bounds_doc.items()):
+                actual = sdk_bounds.get(name)
+                if actual is None:
+                    err(
+                        f"{SKILL}: amounts table documents {name!r}, which "
+                        f"{BOUNDS_PACKAGE}@{dep_pin} does not declare as a bigint "
+                        "constant"
+                    )
+                    continue
+                if actual != units:
+                    err(
+                        f"{SKILL}: amounts table has {name} = {units}n; "
+                        f"{BOUNDS_PACKAGE}@{dep_pin} declares {actual}n"
+                    )
+                    continue
+                try:
+                    stated = float(usdc_cell)
+                except ValueError:
+                    err(
+                        f"{SKILL}: amounts table USDC cell {usdc_cell!r} for "
+                        f"{name} is not a number"
+                    )
+                    continue
+                if round(stated * 10**USDC_DECIMALS) != actual:
+                    err(
+                        f"{SKILL}: amounts table says {name} is {usdc_cell} USDC, "
+                        f"but {actual}n base units is "
+                        f"{actual / 10**USDC_DECIMALS:g} USDC"
+                    )
+
         # The description is what an agent matches a user's request against, so a
         # rail absent from it is unreachable however the body reads.
         description = normalize_rail(frontmatter_description(skill))
@@ -1029,7 +1175,7 @@ def main() -> None:
             f"ok: {PACKAGE}@{pin}; {len(root_doc)} root exports; "
             f"{len(subpaths)} subpaths; {sdk_code_count} error codes; "
             f"{sdk_step_count} steps; {sdk_key_count} cashout keys; "
-            f"{sdk_rail_count} rails"
+            f"{sdk_rail_count} rails; {sdk_bound_count} amount bounds"
         )
         if latest and latest != pin:
             print(f"notice: pin {pin} lags registry latest {latest}")
