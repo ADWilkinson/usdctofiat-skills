@@ -18,6 +18,7 @@ def err(msg: str) -> None:
 ROOT = Path(".")
 ROOT_SKILL = ROOT / "SKILL.md"
 NESTED_SKILL = ROOT / "skills/cashout/SKILL.md"
+PATH_SKILL = ROOT / "cashout/SKILL.md"
 README = ROOT / "README.md"
 PIN_RE = re.compile(r"^npm install @usdctofiat/offramp@(\d+\.\d+\.\d+)$", re.M)
 UNPINNED_SDK_RE = re.compile(r"^npm install @usdctofiat/offramp\s*$", re.M)
@@ -123,10 +124,19 @@ def sdk_pin(path: Path, text: str) -> str | None:
 
 root_text = load(ROOT_SKILL)
 nested_text = load(NESTED_SKILL)
+path_text = load(PATH_SKILL)
 readme_text = load(README)
 
-if root_text and nested_text and root_text != nested_text:
-    err("SKILL.md and skills/cashout/SKILL.md must be identical")
+copies = {
+    "SKILL.md": root_text,
+    "skills/cashout/SKILL.md": nested_text,
+    "cashout/SKILL.md": path_text,
+}
+present = {k: v for k, v in copies.items() if v}
+if len(present) >= 2:
+    bodies = list(present.values())
+    if any(b != bodies[0] for b in bodies[1:]):
+        err("SKILL.md copies must be identical: " + ", ".join(present))
 
 if nested_text:
     fm = parse_frontmatter(NESTED_SKILL, nested_text)
@@ -142,6 +152,9 @@ if root_text:
 skill_pin = sdk_pin(NESTED_SKILL, nested_text) if nested_text else None
 if root_text:
     sdk_pin(ROOT_SKILL, root_text)
+if path_text:
+    parse_frontmatter(PATH_SKILL, path_text)
+    sdk_pin(PATH_SKILL, path_text)
 
 if readme_text:
     if UNPINNED_NPX_RE.search(readme_text):

@@ -1,6 +1,6 @@
 ---
 name: cashout
-description: 'Sell Base USDC for fiat with one call: cashout({ mode: "fast" | "best" }) from @usdctofiat/offramp. Use when a user wants a non-custodial cash-out from a real Base wallet into Venmo, Revolut, PayPal, Zelle, Monzo, Chime or Mercado Pago. Cash App is disabled in the SDK. Fast is 0% spread; Best is Delegate pricing at 10 bps. Require an explicit mode.'
+description: "Sell Base USDC for fiat with cashout from @usdctofiat/offramp. Use when a user wants a non-custodial cash-out from a real Base wallet into Venmo, Revolut, PayPal, Zelle, Monzo, Chime, or Mercado Pago. Require an explicit fast or best mode. Cash App new creation is disabled in the SDK."
 ---
 
 # USDCtoFiat cash-out
