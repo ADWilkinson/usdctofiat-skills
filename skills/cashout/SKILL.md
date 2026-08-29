@@ -41,6 +41,17 @@ Strings and numbers are human USDC amounts. A `bigint` is exact six-decimal base
 
 Persist `depositId` immediately. Fast `depositId` is the composite resume key for `createOfframp().watch()`. Best `depositId` is the numeric EscrowV2 id for `deposits()` / `close()`.
 
+## Amounts
+
+Both floors ship from the package root. Fast rejects an amount under the hard floor before submission; the practical floor is advice the SDK does not enforce.
+
+| Bound                            | Base units | USDC | Meaning                                                                          |
+| -------------------------------- | ---------- | ---- | -------------------------------------------------------------------------------- |
+| `MIN_CASHOUT_AMOUNT`             | `10000n`   | 0.01 | Hard floor; below one cent a deposit is dust and can never fill                  |
+| `RECOMMENDED_MIN_CASHOUT_AMOUNT` | `1000000n` | 1    | Practical floor; a sub-1-USDC deposit forces min==max fills and starves matching |
+
+Ask for a larger amount rather than creating a deposit under the practical floor. Nothing fails loudly, so the deposit is created and then sits unfilled.
+
 ## Rails
 
 Every rail in `PLATFORMS`. The Offer column is this skill's routing guidance, not an SDK field: a no rail is still a real `PLATFORMS` entry, so read the reason before assuming the SDK will reject it.
@@ -124,6 +135,7 @@ Progress callback via `onProgress: (p) => void` with `step` values: `approving`,
 - Never log `walletClient` or private keys.
 - Do not invent a sandbox. Production Base only.
 - Read platform identifier rules from `PLATFORMS`; do not copy a stale list.
+- Check the amount against `RECOMMENDED_MIN_CASHOUT_AMOUNT` before creating a deposit; a smaller one is accepted and then starves matching.
 - Do not offer Wise while its published P2P crypto-sale prohibition applies.
 - Never pass `otcTaker` on a fresh cash-out. The protocol cannot create a deposit paused and private in one transaction, so 9.0.0 rejects it with `UNSUPPORTED`.
 - Restrict an already-confirmed undelegated deposit with `enableOtc`, and lift it with `disableOtc`.
