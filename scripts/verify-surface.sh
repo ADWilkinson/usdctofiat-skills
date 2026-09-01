@@ -501,6 +501,36 @@ def documented_bounds(skill: str) -> dict[str, tuple[int, str]]:
     return bounds
 
 
+def documented_delegation(skill: str) -> dict[str, str]:
+    """Return {delegation field: asserted value} from the Install example.
+
+    The Install block reads each field and states its value in a trailing
+    comment, so the comment is the claim: `...delegation.feeRateBps; // 10`.
+    """
+    found = re.findall(
+        rf"OFFRAMP_DEVELOPER_RESOURCES\.delegation\.({IDENT})\s*;\s*//\s*(\S+)",
+        skill,
+    )
+    fields = {name: value for name, value in found}
+    if not fields:
+        err(f"{SKILL}: no annotated OFFRAMP_DEVELOPER_RESOURCES.delegation reads found")
+    return fields
+
+
+def documented_best_fee_bps(skill: str) -> int | None:
+    """Return the Best-mode fee in bps from the Fast/Best table."""
+    for line in skill.splitlines():
+        if not line.startswith("|") or "`best`" not in line:
+            continue
+        m = re.search(r"(\d+)\s*bps", line)
+        if not m:
+            err(f"{SKILL}: Fast/Best table has no '<n> bps' fee for `best`")
+            return None
+        return int(m.group(1))
+    err(f"{SKILL}: Fast/Best table has no `best` row")
+    return None
+
+
 def documented_error_codes(skill: str) -> set[str]:
     codes: set[str] = set()
     in_table = False
@@ -703,6 +733,34 @@ def const_object_keys(decl: str) -> set[str]:
 
 def union_string_literals(decl: str) -> set[str]:
     return set(re.findall(r'"([^"]+)"', decl))
+
+
+def delegation_literals(decl: str, text: str) -> dict[str, str] | None:
+    """Return {field: literal} for the delegation block of a resources decl.
+
+    Fields are declared either as an inline literal type (`required: false`) or
+    as `typeof SOME_CONST`, where the const is declared beside the interface in
+    the same file. An alias whose const carries a type but no initializer -- as
+    the address constants do -- has no literal to compare and is left out.
+    """
+    m = re.search(r"\bdelegation\s*:\s*\{", decl)
+    if not m:
+        return None
+    block = slice_brace_block(decl, m.start())
+    out: dict[str, str] = {}
+    for name, raw in re.findall(rf"({IDENT})\s*:\s*([^;{{}}]+);", block):
+        value = raw.strip()
+        alias = re.fullmatch(rf"typeof\s+({IDENT})", value)
+        if not alias:
+            out[name] = value
+            continue
+        const = re.search(
+            rf"\bdeclare\s+const\s+{re.escape(alias.group(1))}\s*(?::[^=;]+)?=\s*([^;]+);",
+            text,
+        )
+        if const:
+            out[name] = const.group(1).strip()
+    return out
 
 
 def property_keys(decl: str) -> set[str]:
@@ -1156,6 +1214,48 @@ def main() -> None:
                         f"{actual / 10**USDC_DECIMALS:g} USDC"
                     )
 
+        # Delegation values are quoted twice: the Fast/Best table prices Best
+        # from feeRateBps, and the Install example asserts each field inline.
+        # The root-export scan proves only that OFFRAMP_DEVELOPER_RESOURCES
+        # exists, so a repin that moved the fee or flipped `required` would
+        # leave both claims stale -- and a wrong fee misprices every Best
+        # cash-out the skill quotes.
+        delegation_doc = documented_delegation(skill)
+        best_bps_doc = documented_best_fee_bps(skill)
+        resources_resolved = bundle.resolve("OfframpDeveloperResources", pin)
+        if resources_resolved is not None:
+            path, _orig, decl = resources_resolved
+            literals = delegation_literals(decl, bundle.text(path))
+            if literals is None:
+                err(
+                    f"{path.name}: OfframpDeveloperResources has no delegation block "
+                    f"in {PACKAGE}@{pin}"
+                )
+            else:
+                for name, claimed in sorted(delegation_doc.items()):
+                    actual = literals.get(name)
+                    if actual is None:
+                        err(
+                            f"{SKILL}: Install example reads delegation.{name}, which "
+                            f"{path.name} ({PACKAGE}@{pin}) does not declare as a "
+                            "literal value"
+                        )
+                    elif actual != claimed:
+                        err(
+                            f"{SKILL}: Install example says delegation.{name} is "
+                            f"{claimed}; {path.name} ({PACKAGE}@{pin}) declares {actual}"
+                        )
+                fee = literals.get("feeRateBps")
+                if (
+                    best_bps_doc is not None
+                    and fee is not None
+                    and fee != str(best_bps_doc)
+                ):
+                    err(
+                        f"{SKILL}: Fast/Best table prices Best at {best_bps_doc} bps; "
+                        f"{path.name} ({PACKAGE}@{pin}) declares feeRateBps {fee}"
+                    )
+
         # The description is what an agent matches a user's request against, so a
         # rail absent from it is unreachable however the body reads.
         description = normalize_rail(frontmatter_description(skill))
@@ -1175,7 +1275,8 @@ def main() -> None:
             f"ok: {PACKAGE}@{pin}; {len(root_doc)} root exports; "
             f"{len(subpaths)} subpaths; {sdk_code_count} error codes; "
             f"{sdk_step_count} steps; {sdk_key_count} cashout keys; "
-            f"{sdk_rail_count} rails; {sdk_bound_count} amount bounds"
+            f"{sdk_rail_count} rails; {sdk_bound_count} amount bounds; "
+            f"{len(delegation_doc)} delegation values"
         )
         if latest and latest != pin:
             print(f"notice: pin {pin} lags registry latest {latest}")
