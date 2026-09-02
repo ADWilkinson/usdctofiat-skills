@@ -557,6 +557,58 @@ def documented_fast_fee_bps(skill: str) -> int | None:
     return None
 
 
+def documented_fill_ranges(skill: str) -> dict[str, tuple[str, str]]:
+    """Return {mode: (per-order min cell, per-order max cell)} as raw cells.
+
+    Cells are USDC and each is one of `amount`, a bare number, or
+    `min(amount, <n>)`. They are kept as text here so the SDK comparison can
+    say which of the three shapes the runtime actually builds.
+    """
+    ranges: dict[str, tuple[str, str]] = {}
+    in_table = False
+    for line in skill.splitlines():
+        if line.startswith("|") and re.search(
+            r"\|\s*Mode\s*\|\s*Per-order min\s*\|\s*Per-order max\s*\|", line, re.I
+        ):
+            in_table = True
+            continue
+        if not in_table:
+            continue
+        if not line.startswith("|"):
+            break
+        if re.match(r"^\|\s*-+", line):
+            continue
+        cols = [c.strip() for c in line.split("|")]
+        if len(cols) < 4:
+            continue
+        mode = re.fullmatch(r"`([a-z]+)`", cols[1])
+        if not mode:
+            err(f"{SKILL}: fill-range row {cols[1]!r} is not a backticked mode")
+            continue
+        cells: list[str] = []
+        for cell in (cols[2], cols[3]):
+            m = re.fullmatch(r"`([^`]+)`", cell)
+            if not m:
+                err(
+                    f"{SKILL}: fill-range cell {cell!r} for mode "
+                    f"{mode.group(1)!r} is not a backticked bound"
+                )
+                cells = []
+                break
+            cells.append(m.group(1).strip())
+        if len(cells) == 2:
+            ranges[mode.group(1)] = (cells[0], cells[1])
+    if not ranges:
+        err(f"{SKILL}: no per-order fill-range table rows found")
+    return ranges
+
+
+def capped_bound(cell: str) -> int | None:
+    """USDC ceiling a `min(amount, <n>)` cell claims, or None for another shape."""
+    m = re.fullmatch(r"min\(\s*amount\s*,\s*(\d+)\s*\)", cell)
+    return int(m.group(1)) if m else None
+
+
 def documented_error_codes(skill: str) -> set[str]:
     codes: set[str] = set()
     in_table = False
@@ -930,22 +982,37 @@ def bounds_dependency_pin(pkg_root: Path, pin: str) -> str | None:
     return None
 
 
-def dependency_bigint_consts(names: list[str], dep_pin: str) -> dict[str, int]:
-    """Declared value of each `declare const NAME = <n>n` in BOUNDS_PACKAGE."""
+_dependency_blobs: dict[str, bytes | None] = {}
+
+
+def dependency_blob(dep_pin: str) -> bytes | None:
+    """Integrity-checked BOUNDS_PACKAGE tarball, fetched at most once per run."""
+    if dep_pin in _dependency_blobs:
+        return _dependency_blobs[dep_pin]
+    blob: bytes | None = None
     packument = json.loads(http_get(BOUNDS_REGISTRY).decode("utf-8"))
     versions = packument.get("versions") or {}
     if dep_pin not in versions:
         err(f"{BOUNDS_PACKAGE}@{dep_pin} is not a published version")
+    else:
+        dist = versions[dep_pin].get("dist") or {}
+        tarball_url = dist.get("tarball")
+        if not tarball_url:
+            err(f"{BOUNDS_PACKAGE}@{dep_pin}: packument is missing dist.tarball")
+        else:
+            blob = http_get(tarball_url)
+            integrity = dist.get("integrity")
+            if integrity:
+                verify_integrity(blob, integrity, dep_pin, BOUNDS_PACKAGE)
+    _dependency_blobs[dep_pin] = blob
+    return blob
+
+
+def dependency_bigint_consts(names: list[str], dep_pin: str) -> dict[str, int]:
+    """Declared value of each `declare const NAME = <n>n` in BOUNDS_PACKAGE."""
+    blob = dependency_blob(dep_pin)
+    if blob is None:
         return {}
-    dist = versions[dep_pin].get("dist") or {}
-    tarball_url = dist.get("tarball")
-    if not tarball_url:
-        err(f"{BOUNDS_PACKAGE}@{dep_pin}: packument is missing dist.tarball")
-        return {}
-    blob = http_get(tarball_url)
-    integrity = dist.get("integrity")
-    if integrity:
-        verify_integrity(blob, integrity, dep_pin, BOUNDS_PACKAGE)
     found: dict[str, int] = {}
     with tempfile.TemporaryDirectory(prefix="usdctofiat-bounds-") as tmp:
         dest = Path(tmp)
@@ -964,6 +1031,176 @@ def dependency_bigint_consts(names: list[str], dep_pin: str) -> dict[str, int]:
                     found[name] = int(m.group(1))
                     break
     return found
+
+
+# The per-order range is built from constants neither package exports or
+# documents, so these names are read straight out of the shipped bundles.
+# A repin that renames one fails this check rather than silently passing: the
+# claim is unprovable at that point, and a wrong ceiling is the difference
+# between a cash-out that clears once and one that waits on several buyers.
+BEST_MIN_CONST = "MIN_ORDER_USDC"
+BEST_MAX_CONST = "MAX_ORDER_USDC"
+FAST_MIN_CONST = "DEFAULT_MIN_ORDER_FLOOR"
+FAST_RANGE_FN = "buildIntentAmountRange"
+
+
+def runtime_sources(root: Path) -> dict[str, str]:
+    """Comment-stripped ESM bundles shipped under the package's dist/."""
+    dist = root / "dist"
+    if not dist.is_dir():
+        return {}
+    return {
+        src.name: strip_comments(src.read_text(encoding="utf-8"))
+        for src in sorted(dist.glob("*.js"))
+    }
+
+
+def js_number_const(sources: dict[str, str], name: str, label: str) -> int | None:
+    """Single literal value of `var NAME = <n>[n];` across the bundles."""
+    pat = re.compile(rf"\b(?:var|let|const)\s+{re.escape(name)}\s*=\s*(\d+)n?\s*;")
+    values = {int(m.group(1)) for src in sources.values() for m in pat.finditer(src)}
+    if not values:
+        err(f"{label}: {name} is not declared as a number literal in dist/*.js")
+        return None
+    if len(values) > 1:
+        err(f"{label}: {name} has conflicting literals {sorted(values)} in dist/*.js")
+        return None
+    return next(iter(values))
+
+
+def best_fill_range(
+    sources: dict[str, str], label: str
+) -> tuple[int | None, int | None]:
+    """(per-order min USDC, per-order ceiling USDC) built by the Best deposit.
+
+    Reading the constants alone would prove only that they exist. This resolves
+    the `intentAmountRange` literal the deposit is actually created with and
+    walks back to the locals it is assigned from, so a constant left declared
+    but unwired fails instead of confirming the table.
+    """
+    hits = [
+        (name, m)
+        for name, src in sources.items()
+        for m in re.finditer(r"\bintentAmountRange\s*:\s*\{", src)
+    ]
+    if not hits:
+        err(f"{label}: no intentAmountRange object literal in dist/*.js")
+        return None, None
+    if len(hits) > 1:
+        err(
+            f"{label}: {len(hits)} intentAmountRange literals in dist/*.js; the "
+            "fill-range table claims one range per mode and cannot say which"
+        )
+        return None, None
+    name, m = hits[0]
+    src = sources[name]
+    block = slice_brace_block(src, m.start())
+    out: list[int | None] = []
+    for field, const, capped in (
+        ("min", BEST_MIN_CONST, False),
+        ("max", BEST_MAX_CONST, True),
+    ):
+        ref = re.search(rf"\b{field}\s*:\s*({IDENT})\b", block)
+        if not ref:
+            err(f"{name}: intentAmountRange has no {field} local ({label})")
+            out.append(None)
+            continue
+        local = ref.group(1)
+        decl = re.search(
+            rf"\b(?:const|let|var)\s+{re.escape(local)}\s*=\s*([^;]+);", src
+        )
+        if not decl:
+            err(
+                f"{name}: intentAmountRange {field} local {local!r} has no "
+                f"declaration ({label})"
+            )
+            out.append(None)
+            continue
+        expr = decl.group(1)
+        if const not in expr:
+            err(
+                f"{name}: intentAmountRange {field} is built from {expr.strip()!r}, "
+                f"which does not read {const} ({label})"
+            )
+            out.append(None)
+            continue
+        if capped and not re.search(rf"Math\.min\([^;]*\b{re.escape(const)}\b", expr):
+            err(
+                f"{name}: intentAmountRange max reads {const} without a Math.min "
+                f"ceiling ({label}); the table claims min(amount, <n>)"
+            )
+            out.append(None)
+            continue
+        out.append(js_number_const(sources, const, label))
+    return out[0], out[1]
+
+
+def fast_fill_range(
+    sources: dict[str, str], label: str
+) -> tuple[int | None, str | None]:
+    """(per-order min USDC, max shape) the Fast route's range builder writes."""
+    hits = [
+        (name, m)
+        for name, src in sources.items()
+        for m in re.finditer(
+            rf"\bfunction\s+{FAST_RANGE_FN}\s*\(\s*({IDENT})\s*\)", src
+        )
+    ]
+    if not hits:
+        err(f"{label}: {FAST_RANGE_FN}() is not defined in dist/*.js")
+        return None, None
+    name, m = hits[0]
+    src = sources[name]
+    if not re.search(rf"intentAmountRange\s*(?:=|\?\?)[^;]*\b{FAST_RANGE_FN}\s*\(", src):
+        err(
+            f"{name}: {FAST_RANGE_FN}() is defined but never builds an "
+            f"intentAmountRange ({label})"
+        )
+        return None, None
+    param = m.group(1)
+    body = slice_brace_block(src, m.end())
+    ret = re.search(r"\breturn\s*\{", body)
+    if not ret:
+        err(f"{name}: {FAST_RANGE_FN}() returns no object literal ({label})")
+        return None, None
+    returned = slice_brace_block(body, ret.start())
+    max_at = re.search(r"\bmax\s*:", returned)
+    if not max_at:
+        err(f"{name}: {FAST_RANGE_FN}() return has no max field ({label})")
+        return None, None
+    # Slice to the matching separator rather than the first comma, so a nested
+    # call such as Math.min(amount, CAP) is reported whole instead of clipped.
+    depth = 0
+    end = max_at.end()
+    while end < len(returned):
+        ch = returned[end]
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            if depth == 0:
+                break
+            depth -= 1
+        elif ch == "," and depth == 0:
+            break
+        end += 1
+    raw = returned[max_at.end() : end].strip()
+    shape = "amount" if raw == param else raw
+    if FAST_MIN_CONST not in body:
+        err(
+            f"{name}: {FAST_RANGE_FN}() does not read {FAST_MIN_CONST} ({label}); "
+            "the table claims a per-order minimum"
+        )
+        return None, shape
+    units = js_number_const(sources, FAST_MIN_CONST, label)
+    if units is None:
+        return None, shape
+    if units % 10**USDC_DECIMALS:
+        err(
+            f"{label}: {FAST_MIN_CONST} is {units}n base units, which is not a "
+            "whole number of USDC; the fill-range table states whole USDC"
+        )
+        return None, shape
+    return units // 10**USDC_DECIMALS, shape
 
 
 def entry_dts(pkg_root: Path, pin: str) -> Path:
@@ -1240,6 +1477,77 @@ def main() -> None:
                         f"{actual / 10**USDC_DECIMALS:g} USDC"
                     )
 
+        # The floors above bound the deposit; this bounds a single fill of it.
+        # Best writes its own intentAmountRange and caps one order, so a Best
+        # cash-out above that ceiling needs several buyers however healthy the
+        # rail is -- and an agent that quotes a single fill has promised a wait
+        # it cannot deliver. Nothing rejects the amount, so only reading the
+        # ranges the two routes actually build catches a moved ceiling.
+        ranges_doc = documented_fill_ranges(skill)
+        offramp_label = f"{PACKAGE}@{pin}"
+        best_min, best_cap = best_fill_range(runtime_sources(pkg_root), offramp_label)
+        best_doc = ranges_doc.get("best")
+        if best_doc is None:
+            err(f"{SKILL}: fill-range table has no `best` row")
+        else:
+            doc_min, doc_max = best_doc
+            if best_min is not None and doc_min != str(best_min):
+                err(
+                    f"{SKILL}: fill-range table gives Best a per-order min of "
+                    f"{doc_min!r}; {offramp_label} builds it from "
+                    f"{BEST_MIN_CONST} = {best_min}"
+                )
+            doc_cap = capped_bound(doc_max)
+            if doc_cap is None:
+                err(
+                    f"{SKILL}: fill-range table gives Best a per-order max of "
+                    f"{doc_max!r}; {offramp_label} caps it, so write "
+                    "min(amount, <n>)"
+                )
+            elif best_cap is not None and doc_cap != best_cap:
+                err(
+                    f"{SKILL}: fill-range table caps a Best order at {doc_cap} "
+                    f"USDC; {offramp_label} declares {BEST_MAX_CONST} = {best_cap}"
+                )
+
+        fast_doc = ranges_doc.get("fast")
+        if fast_doc is None:
+            err(f"{SKILL}: fill-range table has no `fast` row")
+        elif dep_pin:
+            fast_label = f"{BOUNDS_PACKAGE}@{dep_pin}"
+            blob = dependency_blob(dep_pin)
+            if blob is not None:
+                with tempfile.TemporaryDirectory(prefix="usdctofiat-fast-") as tmp:
+                    dest = Path(tmp)
+                    with tarfile.open(fileobj=io.BytesIO(blob), mode="r:gz") as tar:
+                        safe_extract(tar, dest, BOUNDS_PACKAGE)
+                    fast_min, fast_shape = fast_fill_range(
+                        runtime_sources(dest / "package"), fast_label
+                    )
+                doc_min, doc_max = fast_doc
+                if fast_min is not None and capped_bound(doc_min) != fast_min:
+                    err(
+                        f"{SKILL}: fill-range table gives Fast a per-order min of "
+                        f"{doc_min!r}; {fast_label} floors it at {fast_min} USDC, "
+                        f"so write min(amount, {fast_min})"
+                    )
+                if fast_shape is not None and fast_shape != "amount":
+                    err(
+                        f"{SKILL}: fill-range table gives Fast no ceiling; "
+                        f"{fast_label} builds max from {fast_shape!r}"
+                    )
+                elif fast_shape == "amount" and doc_max != "amount":
+                    err(
+                        f"{SKILL}: fill-range table gives Fast a per-order max of "
+                        f"{doc_max!r}; {fast_label} writes the whole amount, so "
+                        "write amount"
+                    )
+        else:
+            err(
+                f"{SKILL}: fill-range table states a Fast per-order range, but no "
+                f"{BOUNDS_PACKAGE} pin was resolved to verify it against"
+            )
+
         # Delegation values are quoted twice: the Fast/Best table prices Best
         # from feeRateBps, and the Install example asserts each field inline.
         # The root-export scan proves only that OFFRAMP_DEVELOPER_RESOURCES
@@ -1342,7 +1650,8 @@ def main() -> None:
             f"{sdk_step_count} steps; {sdk_key_count} cashout keys; "
             f"{sdk_rail_count} rails; {sdk_bound_count} amount bounds; "
             f"{len(delegation_doc)} delegation values; "
-            f"fast spread {sdk_fast_bps} bps"
+            f"fast spread {sdk_fast_bps} bps; "
+            f"best order cap {best_cap} USDC"
         )
         if latest and latest != pin:
             print(f"notice: pin {pin} lags registry latest {latest}")

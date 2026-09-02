@@ -52,6 +52,17 @@ Both floors ship from the package root. Fast rejects an amount under the hard fl
 
 Ask for a larger amount rather than creating a deposit under the practical floor. Nothing fails loudly, so the deposit is created and then sits unfilled.
 
+### Per-order fill range
+
+A deposit is drained by orders, and each mode writes its own per-order range when it creates the deposit. Best caps one order at 1,500 USDC, so a Best cash-out above that cannot clear in a single fill and needs one buyer per 1,500 USDC slice. Fast writes the whole amount as its ceiling.
+
+| Mode   | Per-order min    | Per-order max       |
+| ------ | ---------------- | ------------------- |
+| `fast` | `min(amount, 1)` | `amount`            |
+| `best` | `1`              | `min(amount, 1500)` |
+
+Cells are USDC. Neither ceiling rejects a large amount, so nothing fails: it only changes how many fills the deposit waits for. Prefer Fast above 1,500 USDC, or tell the user Best will fill in pieces.
+
 ## Rails
 
 Every rail in `PLATFORMS`. The Offer column is this skill's routing guidance, not an SDK field: a no rail is still a real `PLATFORMS` entry, so read the reason before assuming the SDK will reject it.
@@ -136,6 +147,7 @@ Progress callback via `onProgress: (p) => void` with `step` values: `approving`,
 - Do not invent a sandbox. Production Base only.
 - Read platform identifier rules from `PLATFORMS`; do not copy a stale list.
 - Check the amount against `RECOMMENDED_MIN_CASHOUT_AMOUNT` before creating a deposit; a smaller one is accepted and then starves matching.
+- A Best cash-out over 1,500 USDC cannot clear in one order. Route it through Fast or say it fills in pieces.
 - Do not offer Wise while its published P2P crypto-sale prohibition applies.
 - Never pass `otcTaker` on a fresh cash-out. The protocol cannot create a deposit paused and private in one transaction, so 9.0.0 rejects it with `UNSUPPORTED`.
 - Restrict an already-confirmed undelegated deposit with `enableOtc`, and lift it with `disableOtc`.
