@@ -1149,6 +1149,14 @@ def fast_fill_range(
     if not hits:
         err(f"{label}: {FAST_RANGE_FN}() is not defined in dist/*.js")
         return None, None
+    if len(hits) > 1:
+        # Same reason the Best reader refuses two range literals: with more than
+        # one definition there is no single range the `fast` row can name.
+        err(
+            f"{label}: {len(hits)} {FAST_RANGE_FN}() definitions in dist/*.js; "
+            "the fill-range table cannot say which builds the Fast range"
+        )
+        return None, None
     name, m = hits[0]
     src = sources[name]
     if not re.search(rf"intentAmountRange\s*(?:=|\?\?)[^;]*\b{FAST_RANGE_FN}\s*\(", src):
