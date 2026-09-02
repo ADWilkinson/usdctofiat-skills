@@ -531,6 +531,32 @@ def documented_best_fee_bps(skill: str) -> int | None:
     return None
 
 
+def documented_fast_fee_bps(skill: str) -> int | None:
+    """Return the Fast-mode spread in bps from the Fast/Best table.
+
+    The Fast fee cell states one price twice -- `0% spread / 0 bps` -- so both
+    readings are parsed and a disagreement between them is itself an error.
+    """
+    for line in skill.splitlines():
+        if not line.startswith("|") or "`fast`" not in line:
+            continue
+        m = re.search(r"(\d+)\s*bps", line)
+        if not m:
+            err(f"{SKILL}: Fast/Best table has no '<n> bps' fee for `fast`")
+            return None
+        bps = int(m.group(1))
+        pct = re.search(r"(\d+(?:\.\d+)?)\s*%", line)
+        if pct is not None and round(float(pct.group(1)) * 100) != bps:
+            err(
+                f"{SKILL}: Fast/Best table prices Fast at {pct.group(1)}% and "
+                f"{bps} bps, which are not the same spread"
+            )
+            return None
+        return bps
+    err(f"{SKILL}: Fast/Best table has no `fast` row")
+    return None
+
+
 def documented_error_codes(skill: str) -> set[str]:
     codes: set[str] = set()
     in_table = False
@@ -1256,6 +1282,45 @@ def main() -> None:
                         f"{path.name} ({PACKAGE}@{pin}) declares feeRateBps {fee}"
                     )
 
+        # Fast is the mode every example passes and the default an agent quotes,
+        # yet its price was the one number in the Fast/Best table nothing read.
+        # The SDK pins the spread as a literal type on the capabilities pricing
+        # block, so a repin that started charging would leave the skill
+        # advertising a free cash-out that the SDK no longer gives.
+        fast_bps_doc = documented_fast_fee_bps(skill)
+        sdk_fast_bps: int | None = None
+        capabilities_resolved = bundle.resolve("OfframpCashCapabilities", pin)
+        if capabilities_resolved is not None:
+            path, _orig, decl = capabilities_resolved
+            m = re.search(r"\bpricing\s*:\s*\{", decl)
+            if not m:
+                err(
+                    f"{path.name}: OfframpCashCapabilities has no pricing block in "
+                    f"{PACKAGE}@{pin}"
+                )
+            else:
+                block = slice_brace_block(decl, m.start())
+                spread = re.search(r"\bspreadBps\s*:\s*(\d+)\s*;", block)
+                if spread is None:
+                    err(
+                        f"{path.name}: pricing.spreadBps is not a literal in "
+                        f"{PACKAGE}@{pin}; the Fast/Best table cannot claim a "
+                        "fixed spread the SDK no longer fixes"
+                    )
+                else:
+                    sdk_fast_bps = int(spread.group(1))
+                    if fast_bps_doc is not None and sdk_fast_bps != fast_bps_doc:
+                        err(
+                            f"{SKILL}: Fast/Best table prices Fast at "
+                            f"{fast_bps_doc} bps; {path.name} ({PACKAGE}@{pin}) "
+                            f"declares pricing.spreadBps {sdk_fast_bps}"
+                        )
+        else:
+            err(
+                f"{SKILL}: OfframpCashCapabilities is not a root export of "
+                f"{PACKAGE}@{pin}"
+            )
+
         # The description is what an agent matches a user's request against, so a
         # rail absent from it is unreachable however the body reads.
         description = normalize_rail(frontmatter_description(skill))
@@ -1276,7 +1341,8 @@ def main() -> None:
             f"{len(subpaths)} subpaths; {sdk_code_count} error codes; "
             f"{sdk_step_count} steps; {sdk_key_count} cashout keys; "
             f"{sdk_rail_count} rails; {sdk_bound_count} amount bounds; "
-            f"{len(delegation_doc)} delegation values"
+            f"{len(delegation_doc)} delegation values; "
+            f"fast spread {sdk_fast_bps} bps"
         )
         if latest and latest != pin:
             print(f"notice: pin {pin} lags registry latest {latest}")
