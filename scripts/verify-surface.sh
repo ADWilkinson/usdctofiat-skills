@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Network-allowed check: SKILL.md's documented SDK surface vs the pinned tarball.
-# Stdlib Python only (urllib, tarfile, json). Does not replace scripts/check.sh.
+# Network-allowed check: SKILL.md's documented SDK surface vs the pinned tarball,
+# and first-party README URLs still resolve. Stdlib Python only (urllib, tarfile,
+# json). Does not replace scripts/check.sh.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 python3 - <<'PY'
@@ -17,13 +18,21 @@ import sys
 import tarfile
 import tempfile
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
 errors: list[str] = []
 
 ROOT = Path(".")
+README = ROOT / "README.md"
 SKILL = ROOT / "skills/cashout/SKILL.md"
+# README lists third-party registries that bot-wall or checkpoint a GET
+# (npmjs.com, cursor.directory). Those are not this check. First-party
+# product and this-repo GitHub URLs are: a 404 there is a dead consumer link.
+README_LIVE_HOSTS = {"usdctofiat.xyz", "www.usdctofiat.xyz"}
+README_GITHUB_PREFIX = "https://github.com/ADWilkinson/usdctofiat-skills"
+README_URL_RE = re.compile(r"https://[^\s)\]>`'\"]+")
 REGISTRY = "https://registry.npmjs.org/@usdctofiat/offramp"
 PACKAGE = "@usdctofiat/offramp"
 # PACKAGE re-exports its cash-out amount floors from this dependency rather
@@ -178,6 +187,62 @@ def http_get(url: str, timeout: int = 30) -> bytes:
         err(f"{PACKAGE}: timed out fetching {url}")
         fail_exit()
     return b""
+
+
+def readme_http_urls(text: str) -> list[str]:
+    urls: list[str] = []
+    seen: set[str] = set()
+    for raw in README_URL_RE.findall(text):
+        url = raw.rstrip(".,;:")
+        if url in seen:
+            continue
+        seen.add(url)
+        urls.append(url)
+    return urls
+
+
+def is_readme_live_url(url: str) -> bool:
+    host = (urllib.parse.urlparse(url).hostname or "").lower()
+    if host in README_LIVE_HOSTS:
+        return True
+    return url.startswith(README_GITHUB_PREFIX)
+
+
+def http_status(url: str, timeout: int = 20) -> int | None:
+    req = urllib.request.Request(
+        url, headers={"User-Agent": UA, "Accept": "*/*"}
+    )
+    try:
+        with urllib.request.urlopen(
+            req, timeout=timeout, context=ssl.create_default_context()
+        ) as resp:
+            return resp.status
+    except urllib.error.HTTPError as exc:
+        return exc.code
+    except urllib.error.URLError as exc:
+        err(f"README.md: network error fetching {url}: {exc.reason}")
+        return None
+    except TimeoutError:
+        err(f"README.md: timed out fetching {url}")
+        return None
+
+
+def verify_readme_live_urls(text: str) -> int:
+    """HEAD-equivalent GET of first-party README URLs. Returns how many were checked."""
+    live = [url for url in readme_http_urls(text) if is_readme_live_url(url)]
+    if not live:
+        err(
+            "README.md: no usdctofiat.xyz or this-repo GitHub URL to verify; "
+            "the live-link check cannot go silent"
+        )
+        return 0
+    for url in live:
+        status = http_status(url)
+        if status is None:
+            continue
+        if status != 200:
+            err(f"README.md: {url} returned HTTP {status}")
+    return len(live)
 
 
 def strip_comments(src: str) -> str:
@@ -1648,6 +1713,16 @@ def main() -> None:
                         f"offerable rail {name!r}"
                     )
 
+        # First-party README URLs are consumer entry points. A 404 there is a
+        # dead published link, unlike third-party listings this repo does not
+        # operate.
+        readme_text = README.read_text(encoding="utf-8") if README.is_file() else ""
+        if not readme_text:
+            err(f"{README}: missing")
+            readme_live_count = 0
+        else:
+            readme_live_count = verify_readme_live_urls(readme_text)
+
         latest = (packument.get("dist-tags") or {}).get("latest")
         if errors:
             fail_exit()
@@ -1659,7 +1734,8 @@ def main() -> None:
             f"{sdk_rail_count} rails; {sdk_bound_count} amount bounds; "
             f"{len(delegation_doc)} delegation values; "
             f"fast spread {sdk_fast_bps} bps; "
-            f"best order cap {best_cap} USDC"
+            f"best order cap {best_cap} USDC; "
+            f"{readme_live_count} live README urls"
         )
         if latest and latest != pin:
             print(f"notice: pin {pin} lags registry latest {latest}")
