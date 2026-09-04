@@ -12,7 +12,7 @@ npm install @usdctofiat/offramp@9.0.0
 ```
 
 - App: https://usdctofiat.xyz
-- Developers: https://usdctofiat.xyz/developers
+- Docs: https://usdctofiat.xyz/usdc-to-fiat/
 - Scaffold: `npx create-offramp-app@0.1.16 my-offramp --template=next`
 - skills.sh: https://www.skills.sh/adwilkinson/usdctofiat-skills/cashout
 - cursor.directory: https://cursor.directory/plugins/usdctofiat
