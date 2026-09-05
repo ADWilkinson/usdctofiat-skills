@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Network-allowed check: SKILL.md's documented SDK surface vs the pinned tarball,
-# and first-party README URLs still resolve. Stdlib Python only (urllib, tarfile,
-# json). Does not replace scripts/check.sh.
+# first-party README URLs still resolve, and an advertised agentskill.sh listing
+# still teaches the current pin and otcTaker rule. Stdlib Python only (urllib,
+# tarfile, json). Does not replace scripts/check.sh.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 python3 - <<'PY'
@@ -30,9 +31,20 @@ SKILL = ROOT / "skills/cashout/SKILL.md"
 # README lists third-party registries that bot-wall or checkpoint a GET
 # (npmjs.com, cursor.directory). Those are not this check. First-party
 # product and this-repo GitHub URLs are: a 404 there is a dead consumer link.
+# agentskill.sh's install API does not bot-wall. While README still advertises
+# that listing, a 200 payload that teaches the unpinned installer or the old
+# otcTaker rule is a red job; 5xx / timeout / non-JSON is a notice. Unlinking
+# the listing skips the check.
 README_LIVE_HOSTS = {"usdctofiat.xyz", "www.usdctofiat.xyz"}
 README_GITHUB_PREFIX = "https://github.com/ADWilkinson/usdctofiat-skills"
 README_URL_RE = re.compile(r"https://[^\s)\]>`'\"]+")
+AGENTSKILL_PAGE = "https://agentskill.sh/@adwilkinson/cashout"
+AGENTSKILL_INSTALL_API = (
+    "https://agentskill.sh/api/agent/skills/adwilkinson%2Fcashout/install"
+)
+UNPINNED_SDK_RE = re.compile(r"^npm install @usdctofiat/offramp\s*$", re.M)
+OLD_OTC_TAKER = "Pass `otcTaker` only when"
+NEVER_OTC_TAKER = "Never pass `otcTaker`"
 REGISTRY = "https://registry.npmjs.org/@usdctofiat/offramp"
 PACKAGE = "@usdctofiat/offramp"
 # PACKAGE re-exports its cash-out amount floors from this dependency rather
@@ -243,6 +255,94 @@ def verify_readme_live_urls(text: str) -> int:
         if status != 200:
             err(f"README.md: {url} returned HTTP {status}")
     return len(live)
+
+
+def readme_advertises_agentskill(text: str) -> bool:
+    return AGENTSKILL_PAGE in text or AGENTSKILL_INSTALL_API in text
+
+
+def fetch_agentskill_install() -> tuple[int | None, bytes | None, str | None]:
+    """Return (status, body, notice). A notice means skip the contract checks."""
+    req = urllib.request.Request(
+        AGENTSKILL_INSTALL_API,
+        headers={"User-Agent": UA, "Accept": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(
+            req, timeout=30, context=ssl.create_default_context()
+        ) as resp:
+            return resp.status, resp.read(), None
+    except urllib.error.HTTPError as exc:
+        return (
+            exc.code,
+            None,
+            f"notice: agentskill.sh install API returned HTTP {exc.code}; "
+            "listing contract not checked",
+        )
+    except urllib.error.URLError as exc:
+        return (
+            None,
+            None,
+            f"notice: agentskill.sh install API network error: {exc.reason}",
+        )
+    except TimeoutError:
+        return (
+            None,
+            None,
+            "notice: agentskill.sh install API timed out; listing contract not checked",
+        )
+
+
+def verify_advertised_agentskill_listing(text: str, pin: str) -> str:
+    """Check an advertised listing payload. Returns skipped, ok, or notice."""
+    if not readme_advertises_agentskill(text):
+        return "skipped"
+    status, raw, notice = fetch_agentskill_install()
+    if notice:
+        print(notice)
+        return "notice"
+    if status != 200 or raw is None:
+        print(
+            f"notice: agentskill.sh install API returned HTTP {status}; "
+            "listing contract not checked"
+        )
+        return "notice"
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        print(
+            "notice: agentskill.sh install API returned non-JSON; "
+            "listing contract not checked"
+        )
+        return "notice"
+    if not isinstance(data, dict) or not isinstance(data.get("skillMd"), str):
+        print(
+            "notice: agentskill.sh install API JSON has no skillMd string; "
+            "listing contract not checked"
+        )
+        return "notice"
+    body = data["skillMd"]
+    if UNPINNED_SDK_RE.search(body):
+        err(
+            "README.md: advertised agentskill.sh listing still teaches unpinned "
+            "npm install @usdctofiat/offramp"
+        )
+    if OLD_OTC_TAKER in body:
+        err(
+            "README.md: advertised agentskill.sh listing still teaches "
+            "Pass `otcTaker` only when"
+        )
+    pin_token = f"{PACKAGE}@{pin}"
+    if pin_token not in body:
+        err(
+            f"README.md: advertised agentskill.sh listing is missing {pin_token}"
+        )
+    if NEVER_OTC_TAKER not in body:
+        err(
+            "README.md: advertised agentskill.sh listing is missing "
+            "Never pass `otcTaker`"
+        )
+    return "ok"
 
 
 def strip_comments(src: str) -> str:
@@ -1715,13 +1815,19 @@ def main() -> None:
 
         # First-party README URLs are consumer entry points. A 404 there is a
         # dead published link, unlike third-party listings this repo does not
-        # operate.
+        # operate. agentskill.sh is the exception: its install API can return 200
+        # with a stale skill body, so advertising it is a money-moving defect
+        # until the payload matches the current pin and otcTaker rule.
         readme_text = README.read_text(encoding="utf-8") if README.is_file() else ""
         if not readme_text:
             err(f"{README}: missing")
             readme_live_count = 0
+            agentskill_status = "skipped"
         else:
             readme_live_count = verify_readme_live_urls(readme_text)
+            agentskill_status = verify_advertised_agentskill_listing(
+                readme_text, pin
+            )
 
         latest = (packument.get("dist-tags") or {}).get("latest")
         if errors:
@@ -1735,7 +1841,8 @@ def main() -> None:
             f"{len(delegation_doc)} delegation values; "
             f"fast spread {sdk_fast_bps} bps; "
             f"best order cap {best_cap} USDC; "
-            f"{readme_live_count} live README urls"
+            f"{readme_live_count} live README urls; "
+            f"agentskill listing {agentskill_status}"
         )
         if latest and latest != pin:
             print(f"notice: pin {pin} lags registry latest {latest}")
