@@ -20,8 +20,8 @@ ROOT_SKILL = ROOT / "SKILL.md"
 NESTED_SKILL = ROOT / "skills/cashout/SKILL.md"
 PATH_SKILL = ROOT / "cashout/SKILL.md"
 README = ROOT / "README.md"
-PIN_RE = re.compile(r"^npm install @usdctofiat/offramp@(\d+\.\d+\.\d+)$", re.M)
-UNPINNED_SDK_RE = re.compile(r"^npm install @usdctofiat/offramp\s*$", re.M)
+PIN_RE = re.compile(r"^npm install @zkp2p/cash@(\d+\.\d+\.\d+) viem$", re.M)
+UNPINNED_SDK_RE = re.compile(r"^npm install @zkp2p/cash( viem)?\s*$", re.M)
 SKILLS_PIN_RE = re.compile(r"skills@(\d+\.\d+\.\d+)")
 UNPINNED_NPX_RE = re.compile(r"\bnpx skills\b")
 
@@ -111,9 +111,9 @@ def parse_frontmatter(path: Path, text: str) -> dict[str, str]:
 def sdk_pin(path: Path, text: str) -> str | None:
     pins = PIN_RE.findall(text)
     if UNPINNED_SDK_RE.search(text):
-        err(f"{path}: unpinned npm install @usdctofiat/offramp")
+        err(f"{path}: unpinned npm install @zkp2p/cash")
     if not pins:
-        err(f"{path}: missing pinned npm install @usdctofiat/offramp@<version>")
+        err(f"{path}: missing pinned npm install @zkp2p/cash@<version> viem")
         return None
     unique = set(pins)
     if len(unique) != 1:
@@ -173,7 +173,7 @@ if errors:
     sys.exit(1)
 
 print(
-    f"ok: SKILL.md copies identical; SDK pin @usdctofiat/offramp@{skill_pin}; "
+    f"ok: SKILL.md copies identical; SDK pin @zkp2p/cash@{skill_pin}; "
     "YAML frontmatter quoted; README installer pinned"
 )
 PY
